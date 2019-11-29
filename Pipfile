@@ -1,0 +1,17 @@
+[[source]]
+url = "https://pypi.python.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+dlib = "*"
+face-recognition = "*"
+face-recognition-models = "*"
+opencv-python = "*"
+psycopg2-binary = "*"
+websockets = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.7"
