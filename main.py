@@ -24,11 +24,14 @@ import signal
 import cv2
 import psycopg2
 import face_recognition
+import asyncio
+import websockets
+
 
 # globals are atomic
 is_running = True
 
-def generate(video_q):
+def run_capture(video_q):
     """
     Dump camera frames into Queue if its not full
     """
@@ -54,7 +57,7 @@ def generate(video_q):
 
     print("camera thread exited")
 
-def work(video_q, names, faces, face_q):
+def run_decode(video_q, names, faces, face_q):
     pid = os.getpid()
     # workers should not use the inherrited sigint as they will cause the parent
     # to crash and cannot reliably clean up after themselves.
@@ -79,20 +82,44 @@ def work(video_q, names, faces, face_q):
 
             face_q.put((name, face))
 
-def broadcast(face_q):
-    #https://asyncio.readthedocs.io/en/latest/producer_consumer.html
-    # make this an asyncio thread - or maybe the main thread can be...
-    while is_running:
-        try:
-            (name, face) = face_q.get(True, 0.5) # lets is_running get checked
-            print(f"found {name}'s wonderful face")
-        except OSError:
-            print("queue close")
-            break
-        except:
-            print("other error")
-            break
-    print("broadcast thread exited")
+class WebsocketThread(threading.Thread):
+    """
+    A thread for handling websockets. 
+    """
+    def __init__(self):
+        super(WebsocketThread, self).__init__()
+        self.loop = asyncio.new_event_loop()
+
+    def run(self):
+        self.clients = set()
+        # this must be set before we call websockets.serve
+        asyncio.set_event_loop(self.loop)
+
+        start_server = websockets.serve(self._handle_connection, 'localhost',
+                8008)
+        
+        self.loop.run_until_complete(start_server)
+        self.loop.run_forever()
+
+    def stop(self):
+       self.loop.call_soon_threadsafe(self.loop.stop)
+
+    def broadcast(self, data):
+        future = asyncio.run_coroutine_threadsafe(self._handle_broadcast(data),
+                self.loop)
+        result = future.result()
+    
+    async def _handle_connection(self, client, path):
+        print(f'got connection from {path}')
+        self.clients.add(client)
+        await client.wait_closed()
+        self.clients.remove(client)
+
+    async def _handle_broadcast(self, data):
+        print('handle broadcast', data)
+        for client in self.clients:
+            await client.send(data)
+
 
 def get_named_faces(db):
     cur = db.cursor()
@@ -115,28 +142,28 @@ if __name__ == '__main__':
     face_q = mp.Queue()
 
     # reads camera frames to the video queue
-    camera = threading.Thread(target=generate, args=(video_q,))
+    camera = threading.Thread(target=run_capture, args=(video_q,))
     camera.start()
     
     # dispatches websocket events for detected faces in the faces queue
-    broadcaster = threading.Thread(target=broadcast, args=(face_q,))
-    broadcaster.start()
+    websocket_thread = WebsocketThread()
+    websocket_thread.start()
 
     # shared state between this thread and the worker processes, this thread
     # writes and the workers read
     manager = mp.Manager();
     faces = manager.list()
     names = manager.list()
-    db = psycopg2.connect(host="localhost",database="troll",
-            user="troll_admin", password="rootroot")
-    db_names, db_faces = get_named_faces(db)
-    names += db_names
-    faces += db_faces
+    #db = psycopg2.connect(host="localhost",database="troll",
+    #        user="troll_admin", password="rootroot")
+    #db_names, db_faces = get_named_faces(db)
+    #names += db_names
+    #faces += db_faces
 
     # worker processes to process video frames
     workers = []
     for i in range(n_workers):
-        workers.append(mp.Process(target=work, args=(video_q, names, faces,
+        workers.append(mp.Process(target=run_decode, args=(video_q, names, faces,
             face_q)))
         workers[i].start()
 
@@ -145,7 +172,9 @@ if __name__ == '__main__':
         try:
             # replace this bit with something to get a new face from the db.
             # another process does the adding faces stuff.
-            time.sleep(1)
+            (name, face) = face_q.get(True) # lets is_running get checked
+            print(f"got face of {name}")
+            websocket_thread.broadcast(name)
         except (KeyboardInterrupt, SystemExit):
             print("Exiting...")
             break
@@ -154,7 +183,7 @@ if __name__ == '__main__':
 
     # begin cleanup
     print("close db")
-    db.close()
+    #db.close()
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     print("kill threads")
@@ -167,7 +196,11 @@ if __name__ == '__main__':
         worker.join()
 
     face_q.close()
-    broadcaster.join()
+    print("stop websocket thread")
+    websocket_thread.stop()
+    print("join websocket thread")
+    websocket_thread.join()
+    print("websocket thread exited")
 
     for t in threading.enumerate():
         print(t)
