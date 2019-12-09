@@ -9,14 +9,16 @@ BEGIN
     END IF;
 END$$;
 
-\i tables.sql
-
-CREATE OR REPLACE FUNCTION troll_notify() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION notify() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM pg_notify(lower(TG_TABLE_SCHEMA || '_' || TG_TABLE_NAME || '_' || TG_OP), 
-                      row_to_json(NEW)::text);
+    PERFORM pg_notify(
+            lower(TG_TABLE_SCHEMA || '_' || TG_TABLE_NAME || '_' || TG_OP), 
+            NEW.id::text);
     RETURN NULL;
 END;
 $$;
+
+\i tables.sql
+
 
 COMMIT;
